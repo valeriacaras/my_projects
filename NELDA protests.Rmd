@@ -1,0 +1,144 @@
+---
+title: "NELDA data"
+author: "Valeria Caras"
+date: "10/14/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(gridExtra)
+library(margins)
+library(broom)
+library(car)
+library(sjPlot)
+```
+
+```{r}
+#Intro to data 
+#The NELDA.dta database presents data on post-election protests in authoritarian countries by Barbara Geddes et al. (2014) from January 1990 to January 2011
+library(haven)
+setwd("/Users/valeriacaras/Downloads/R Studio")
+NELDA <- read_dta("NELDA.dta")
+
+#convert variables
+NELDA$nelda_index <- as.factor(NELDA$nelda_index)
+NELDA$boycottopp <- as.factor(NELDA$boycottopp)
+NELDA$protestfinal <-as.factor(NELDA$protestfinal)
+NELDA$win <-as.factor(NELDA$win)
+NELDA$gwf <-as.factor(NELDA$gwf)
+NELDA$type <-as.factor(NELDA$type)
+
+NELDA <- na.omit(NELDA)
+
+
+library(dplyr)
+#the dependet vatiable is protesfinal (1 - protest/ 0 - no protest). Cross tabulation of the dependent variable shows that there are in 3 times no protests than present.
+
+table_prot <- NELDA %>%
+  group_by(protestfinal) %>% 
+  summarise(number = n()) %>% 
+  mutate(percent = round(number*100/sum(number), 1))
+
+table_prot
+
+
+#relation between protest and win : most cases with no protest - victory of incumnets; but also 48 cases of victory and protests
+table(NELDA$protestfinal, NELDA$win)
+#relation between protest and win seem to be negative
+
+
+```
+
+
+```{r}
+#modeling protests by inflation, repressions and ethnic fractionalization
+model_repress_eth_infl <- glm(protestfinal ~ psyhint + infl + ethfrac, data = NELDA, family ="binomial")
+
+
+tab_model(model_repress_eth_infl)
+#result: none of the indepndent variables is signigicant while all of them change the log odds of protests in negative way
+
+
+```
+```{r}
+#modeling protests by inflation, repressions and ethnic fractionalization
+
+model_falsification_oppos_regime <- glm(protestfinal ~ nelda_index +type + boycottopp + gwf, data = NELDA, family ="binomial")
+tab_model(model_falsification_oppos_regime)
+#Oppostion boycott appears to be significant.
+
+```
+
+
+```{r}
+#making predictions for all observations
+
+probabilities <- predict(model_falsification_oppos_regime, type = "response")
+hist(probabilities)
+
+
+
+```
+
+```{r}
+#finding the best model with variables type, infl, gwf, NELDA Index, boycott, ethnicfrac, psyhint. 
+
+
+model1 <- glm(protestfinal ~ nelda_index + type + infl + boycottopp + 
+    gwf + ethfrac + psyhint, family = "binomial", data = NELDA)
+  
+summary(model1) #boycottopp is significant, R^2 - 0.122
+tab_model(model1)
+
+
+model2 <- glm(protestfinal ~nelda_index + boycottopp + gwf + ethfrac, family = "binomial", data = NELDA)
+summary(model2)
+tab_model(model2)
+
+model3 <- glm(formula = protestfinal ~ gwf + boycottopp, family = "binomial", data = NELDA)
+#tab_model(model3)
+```
+
+```{r}
+#testing model  for outliners, multicollinearity
+
+# Extract model results
+library(broom)#testing for linearity
+probab <-  predict(model3, type = "response")
+mydata <- NELDA %>%
+  dplyr::select(gwf, boycottopp)
+  
+predictors = colnames(mydata)
+
+mydata1 <- mydata %>%
+  mutate(logit = log(probabilities/(1-probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+mydata1$predictor.value <- as.factor(mydata1$predictor.value)
+
+ggplot()+
+  geom_jitter(data = mydata1, aes(x = logit, y = predictor.value), size = 0.5, alpha = 0.5) +
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+plot(model3, which = 4, id.n = 3)
+library(dplyr)
+#outliners
+model.data <- augment(model3) %>% 
+  mutate(index = 1:n()) 
+
+model.data %>% top_n(3, .cooksd)
+model.data %>% 
+  filter(abs(.std.resid) > 3)
+ggplot(model.data, aes(index, .std.resid)) + 
+  geom_point(aes(color = protestfinal), alpha = .5) +
+  theme_bw()
+#test for multicollinerity - no problem since no variable > |5| 
+car::vif(model3)
+
+```
+
+
+
+
