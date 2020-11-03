@@ -1,0 +1,133 @@
+---
+title: "Leaders dataset"
+author: "Valeria Caras"
+date: "11/3/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Leaders data contains information about attempts  of assults on various political leaders from 1878 to 2001
+setwd("/Users/valeriacaras/Downloads/R Studio")
+leaders <- read.csv("leaders.csv")
+str(leaders)
+
+#variance of result variable
+library(ggplot2)
+ggplot(leaders, aes(result)) + geom_bar() + coord_flip() 
+
+library(dplyr)
+leaders %>% group_by(result) %>% count()
+prop.table(table(leaders$result))
+#in most of  the assults country's leaders wasn't wounded, but the number of 'succesfull' results is 100 of 250 cases -> 40%
+
+#new variable died (1-died, 0 - no)
+
+newdata <- leaders %>% mutate( died = case_when(
+  result %in% c("dies between a day and a week","dies between a week and a month","dies within a day after the attack","dies, timing unknown") ~ 1,
+  result %in%  c("hospitalization but no permanent disability","not wounded","plot stopped","survives but wounded severely","survives, whether wounded unknown","wounded lightly") ~ 0
+))
+
+newdata %>%  filter(died == 1) %>% count() 
+prop.table(table(newdata$died))
+ggplot(newdata, aes(died)) + geom_bar()
+
+```
+
+```{r}
+# Estimate the regression model of the probability of death depending on age (age) and civil war before (civilwarbefore). Receive
+# 1) the probabilities of death for observations 39, 139 and 192, did they coincide with reality?
+# 2) predicted probabilities of death for countries with experience of civil war on the eve of the assassination attempt and without such experience and age of the political leader (MERs or adjusted predictions) (get the graph in any two ways); when is a political leader less likely to survive an assassination attempt?
+# 3) get a graph with average marginal effects (AMEs) for age and civilwarbefore. What do they mean?
+
+library(tidyverse)
+library(broom)
+library(sjPlot) 
+library(margins)
+
+#Building logistic reegression model - predicting leader's death based on age and civil war in the country
+model1 <- glm(died ~ age+civilwarbefore, newdata, family = "binomial")
+summary(model1)
+tab_model(model1)
+#age is slightly significant, meaning that higher age would increase the chance of death in 103% (odds ratios) or in 1.3 times
+
+#model diagnosis
+car::vif(model1) ## variance > |5| then multicollinerity -> no  problem in the model
+plot(model1, which = 4, id.n = 3) #influential cases
+
+
+#1) calculating the death probabilies for certain observations
+
+
+newdata <- cbind(newdata, resid = resid(model1), fitted = fitted(model1))
+(newdata[c(39,139,192), c("died","age","civilwarbefore", "fitted")])
+#observations 39,139 and 192 are predicted not to die(to survive) - > the same was in reality
+
+#2) Predicted values MERs
+#probabilities <- predict(model1, type = "response")
+plot_model(model1, type = "pred", terms = "age")
+plot_model(model1, type = "pred", terms = "civilwarbefore")
+
+
+#OR with margins AMEs
+cplot(model1, what = "prediction","age")
+cplot(model1, what = "prediction", "civilwarbefore")
+
+#OR with testing on new data
+testdata <- expand_grid(age = seq(from = 18, to = 81, by = 1),
+                        civilwarbefore = c(0,1))
+testdata$predictions <- predict(model1, newdata = testdata, type ="response")
+ggplot(testdata, aes(x=age, y=predictions, group=civilwarbefore)) + geom_line(aes(color=civilwarbefore))
+
+##Leaders have less chances to survive if they're older and if a country hasn/t expirienced the civil war before
+
+
+```
+
+```{r}
+#3
+# Evaluate a regression model with the same dependent variable but with politybefore (the level of democracy before the assassination attempt) and interwarbefore (the war on the eve of the assassination attempt).
+# 1) predicted probabilities of death for countries with experience of civil war on the eve of the assassination attempt and without such experience and age of the political leader (MERs or adjusted predictions) (get the graph in any two ways); where are  more chances to survive - in democracies or dictatorships? Does the existence of a military conflict the day before matter?
+# 2) get a graph with average marginal effects (AMEs) for age and interwarbefore. What do they mean?
+
+#changing polity 4 variable according to dataset "autocracies" (-10 to -6), "anocracies" (-5 to +5 and three special values: -66, -77 and -88), and "democracies" (+6 to +10).
+
+newdata2 <- newdata %>% mutate( regime = case_when(
+  politybefore < -6  ~ "autocracy",
+  politybefore  < +5 ~ "anocracy",
+  politybefore > +6  ~ "democracy"
+ 
+))
+
+
+#newdata$politybefore <- as.numeric(newdata$politybefore)
+model2 <- glm(died ~ regime + interwarbefore, newdata2, family = "binomial")
+summary(model2)
+tab_model(model2)
+
+#Both democratic type of regime (polity) and international conflict before are positively but not signifiantly associated with leader's death. Autocracy is negatively associated
+
+#diagnosis
+car::vif(model2) ## variance > |5| then multicollinerity -> no  problem in the model
+plot(model2, which = 4, id.n = 3) #influential cases
+
+#predicting values
+
+#MERs
+plot_model(model2, type = "pred", terms = "regime")
+plot_model(model2, type = "pred", terms = c("regime","interwarbefore"))
+
+#the probability to die is higher in democraries especially in interwar period
+
+#the same model as model1 but later used
+model3 <- glm(died ~ age+civilwarbefore, newdata2, family = "binomial")
+summary(model3)
+all <- tab_model(model3 <- update(model3, .~. + regime + interwarbefore))
+#AMEs
+plot_model(model3, type = "pred", terms = c("age","interwarbefore"))
+#graph shows that probability to die after the assault is higher for older leaders whose state took part in inter war conflict before
+```
+
