@@ -1,0 +1,319 @@
+---
+title: "analysis_trustcovid"
+author: "Valeria Caras"
+date: "12/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(nlme)
+library(sjPlot)
+library(ggeffects)
+library(survey)
+library(MASS)
+```
+
+## Loading selected data and exploring
+
+#### Зависимая переменная не очень нормально распределена, много 1. При учитывании weights становится получше, как и расп-ние контрольных переменных (возраст, пол). Смущает, что основные интересующие независимые переменные lostjob_covid и job_insec тоже ненорм распределены. около 20 проц выборки ответили, что потеряли работу из-за ковида и 14 проц что чувствуют себя незащищенными в плане работы  (эти перем также содержат много пропусков).
+
+```{r}
+ 
+setwd("/Users/valeriacaras/Downloads/R Studio")
+round_1_selected <- read.csv("round_1_selected")
+
+#data has 68146 obs. many missed variables in lostjob_covid (19991), job_insec (24802)
+
+#available control variables : age, gender, urbanisation, indiv health, education. economic indep variables: lostjob_covid, job_insec, finance_last3m, finance_next3m, hous_ends. context variables: govresponse_oxf (measured my Oxford index og reponse to covid), clarity_index - on the country level. + trust_healthcare
+str(round_1_selected)
+
+#Indep variables
+table(round_1_selected$hous_ends) #0 coded as households can make ends, 1 - with difficulty
+prop.table(table(round_1_selected$ind_health)) #0 coded as good, 1 - bad health (only 0.05% bad)
+prop.table(table(round_1_selected$urban)) #0 coded as live in countryside, 1 - town
+prop.table(table(round_1_selected$gend)) #twice many F in dataset
+prop.table(table(round_1_selected$finance_last3m)) #households finances: 1-better (0.04%),2-the same (57%),3-worse (40%)
+prop.table(table(round_1_selected$finance_next3m))
+prop.table(table(round_1_selected$edu_level)) #1-prim,2-second,3-high edu
+prop.table(table(round_1_selected$emp_stat))
+table(round_1_selected$trust_healthcare)
+prop.table(table(round_1_selected$lostjob_covid))
+prop.table(table(round_1_selected$job_insec))
+#dependent variable - trust in govern. 
+ggplot(round_1_selected, aes(trust_govern)) + geom_histogram(stat = "count")
+
+#creating design to accont for weights
+round_1_selected <- round_1_selected %>% group_by(country) %>% mutate( n = n())
+design <- svydesign(data = round_1_selected, weights = ~ w_gross_trim, strata = ~ name_country, fpc = ~n, id = ~CASE)
+#summary(design)
+
+#Dependent variable + healthcare
+svymean(~trust_govern, design,  na.rm = TRUE) #mean for all data in round 1 - 4.7725
+svymean(~trust_healthcare, design,  na.rm = TRUE) #mean 6.3997
+#arrange countries by trust considering weights
+trust_gov_heath <- svyby(~trust_govern + trust_healthcare, by = ~name_country, FUN = svymean, design = design, na.rm = TRUE) %>% as.data.frame() %>%  arrange(desc(trust_govern))
+trust_gov_heath
+
+#indep variables distribution with weights (more balanced for gender,urdan, education and age)
+svytable(~gend, design) %>% as.data.frame() 
+svytable(~urban, design) %>% as.data.frame() 
+svytable(~age_group, design) %>% as.data.frame() 
+svytable(~ind_health, design) %>% as.data.frame() 
+svytable(~edu_level, design) %>% as.data.frame()
+svytable(~lostjob_covid, design) %>% as.data.frame() #1 - lost permanently, 1 - temporarily, 3 - no
+svytable(~job_insec, design) %>% as.data.frame() #0 - no, 1 - feel insecure losing job
+
+```
+
+## Prep data
+
+#### Разделила данные и дальше использовала только датасет с переменными статуса работы во время ковида т.к. меня смущало большое кол-во пропусков в этих переменных. После удаления пропусков (удалила, чтобы модели были потом сопоставимы в  аnova) получилось 38529 наблюдений.
+```{r}
+
+#2 separate datasets cause job variables have many NaNs
+
+#clean data for analysis
+#round1_clean <- round_1_selected[, c("w_gross_trim", "CASE", "name_country", "age_group", "age", "trust_govern", "trust_healthcare", "emp_stat","finance_last3m", "finance_next3m", "edu_level", "gend", "hous_ends", "ind_health", "clarity_index", "govresponse_oxf", "urban")]
+#round1_clean <- na.omit(round1_clean)
+
+#convert to factors + relevel categories
+#round1_clean$age_group <- relevel(factor(round1_clean$age_group), ref = "1")
+#round1_clean$gend <- relevel(factor(round1_clean$gend), ref ="M")
+#round1_clean$emp_stat <- relevel(factor(round1_clean$emp_stat), ref="5")
+#round1_clean$ind_health <- relevel(factor(round1_clean$ind_health), ref = "0")
+#round1_clean$finance_last3m <- relevel(factor(round1_clean$finance_last3m), ref="2")
+#round1_clean$finance_next3m <- relevel(factor(round1_clean$finance_next3m), ref="2")
+#round1_clean$hous_ends <- relevel(factor(round1_clean$hous_ends), ref="0")
+#round1_clean$edu_level <- relevel(factor(round1_clean$edu_level), ref="1")
+#round1_clean$urban <- relevel(factor(round1_clean$urban),ref="1")
+
+round1_job_clean <- round_1_selected[, c("w_gross_trim", "CASE", "name_country", "age_group", "age", "trust_govern", "trust_healthcare", "emp_stat","finance_last3m", "finance_next3m", "edu_level", "gend", "hous_ends", "ind_health", "clarity_index", "govresponse_oxf", "lostjob_covid", "job_insec", "urban")]
+round1_job_clean <- na.omit(round1_job_clean)
+str(round1_job_clean)
+
+#convert to factors + relevel categories for job data
+round1_job_clean$age_group <- relevel(factor(round1_job_clean$age_group), ref = "1")
+round1_job_clean$gend <- relevel(factor(round1_job_clean$gend), ref ="M")
+round1_job_clean$emp_stat <- relevel(factor(round1_job_clean$emp_stat), ref="5")
+round1_job_clean$ind_health <- relevel(factor(round1_job_clean$ind_health), ref = "0")
+round1_job_clean$finance_last3m <- relevel(factor(round1_job_clean$finance_last3m), ref="2")
+round1_job_clean$finance_next3m <- relevel(factor(round1_job_clean$finance_next3m), ref="2")
+round1_job_clean$hous_ends <- relevel(factor(round1_job_clean$hous_ends), ref="0")
+round1_job_clean$edu_level <- relevel(factor(round1_job_clean$edu_level), ref="1")
+round1_job_clean$urban <- relevel(factor(round1_job_clean$urban),ref="1")
+round1_job_clean$lostjob_covid <- relevel(factor(round1_job_clean$lostjob_covid),ref="3")
+round1_job_clean$job_insec <- relevel(factor(round1_job_clean$job_insec),ref="0")
+```
+
+
+## Assess the need for multilevel (following Field)
+
+#### Строила обычную регрессию, регрессию в дамми и random intercept, чтобы сравнить какая лучше. anova показала, что random intercept.
+```{r}
+
+#simple regression
+m0 <- gls(trust_govern ~ 1, data = round1_job_clean, method = "ML")
+#NULL intercept model
+m_0 <- lme(trust_govern ~ 1, random= ~1|name_country, data = round1_job_clean, method = "ML")
+anova(m0, m_0) #m_0 with random intercept is better
+
+#Trying simple regression
+m_lm <-gls(trust_govern ~ age + gend + edu_level + ind_health + urban  + finance_next3m + finance_last3m, data = round1_job_clean, method = "ML", na.action = na.omit)
+
+m_lm2 <-lme(trust_govern ~ age + gend + edu_level + ind_health + urban  + finance_next3m + finance_last3m, random= ~1|name_country, data = round1_job_clean, method = "ML")
+
+anova(m_lm, m_lm2) #multilevel is better
+
+#model with dummies
+m_dummy <-gls(trust_govern ~ age + gend + edu_level + ind_health + urban +  finance_next3m + finance_last3m + factor(name_country), data = round1_job_clean, method = "ML")
+
+tab_model(m_dummy) #R^2 = 0.213
+anova(m_dummy, m_lm2) #multilevel is better than model with dummy
+```
+
+## Multi-level models
+
+#### Центрировала некоторые переменные, так как это помогло избавится от мультиколл. Центрировала по гайду P.Masur из лекции. Доверие к здравоохранению центрировала тк метрические переменная + возраст, об-ние. Не очень уверена на счет правильности центрирования переменных второго уровня - govresponse_oxf, clarity_index. По идеи, у них должен быть значимый уровнень 0 (очень неясная сис-ма и отсут мер по ковиду) и этих 0  не было в выборке.
+
+```{r}
+
+#Centering variables (this helped to remove multicoliniarity). Grand mean
+
+round1_job_clean <- round1_job_clean %>% mutate(cent.healtcare = trust_healthcare-mean(trust_healthcare)) 
+
+round1_job_clean<- round1_job_clean %>% mutate(cent.educ = as.numeric(edu_level)-mean(as.numeric(edu_level)))
+
+round1_job_clean <- round1_job_clean %>% mutate(cent.age = age-mean(age))
+#centering level 2 around population mean ?
+round1_job_clean$cent.response <- round1_job_clean$govresponse_oxf-mean(round1_job_clean$govresponse_oxf)
+
+round1_job_clean$cent.clarity <- round1_job_clean$clarity_index - mean(round1_job_clean$clarity_index)
+```
+
+#### Строила модели randon slope по логике постепенного добавления переменных и сранивала на каждом этапе какая модель лучше (объект comparison). Затем ввела random slope and intercept. В теории, доверие к здравоохранению и эконом ситуация могут быть в рандомной части, так как отличаются со странам. эконом показатели в рандомной не изменили модели (возможно из-за того, как они измерены; отношения к экон ситуации были бы лучше), поэтому оставила модель только с trust in healthcare in random part. Затем ввела в модель random slope and intercept интеракцию между clarity_index и lostjob_covid тк подумала что интересно наказывают ли правительства за потерю работы в зависимости от контекста. Модели строились с учетом весов, maxim likehood method, на 26 странах (без учета UK)
+```{r}
+#model only with control indiv variables. Random slope
+m_controls <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + (1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+##models with controls and economic factors. Random slope
+m_controls_econ <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + emp_stat + (1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+
+anova(m_controls, m_controls_econ) #2nd model better
+
+m_controls_econ2 <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + (1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+anova(m_controls_econ, m_controls_econ2) #m_controls_econ2 better
+
+#adding hous_ends [1] - diffucult to make ends + coef with trust? (странно себя ведет переменная, дальше не учитывала ее в  моделях)
+m_controls_econ3 <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + hous_ends +(1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+
+anova(m_controls_econ2, m_controls_econ3) #m_controls_econ3 better 
+
+m_controls_econ4 <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + finance_next3m + finance_last3m + (1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+anova(m_controls_econ3, m_controls_econ4) #m_controls_econ4 better
+
+#comparing all models with econ variables
+tab_model(m_controls_econ, m_controls_econ2, m_controls_econ3, m_controls_econ4)
+
+#moodels with controls, economic factors, trust in healtcare and contex factors
+
+#adding trust in healtcare
+m_controls_econ_health <- lmer(trust_govern ~ cent.healtcare + cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + finance_next3m + finance_last3m + (1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+anova(m_controls_econ4,m_controls_econ_health) #adding trust in HC is significant
+
+#adding clarity and gov response
+m_cnts_econ_clarity <- lmer(trust_govern ~ cent.healtcare + cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + finance_next3m + finance_last3m + cent.clarity+ cent.response +
+                            (1|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+
+anova(m_cnts_econ_clarity, m_controls_econ4) #impoves the model even if clarity and gov response are not significant statistically
+anova(m_controls_econ_health, m_cnts_econ_clarity) #adding clarity and govresponse doesn't statistically improve the model compared to model with HC
+
+##compare models (1 - model only with controls, 2 - controls + econ, 3 - cnts+econ+HC, 4 - cnts+econ+HC+clarity)  ?adding HC changes ind_health coef from - to +  
+comparison <- tab_model(m_controls, m_controls_econ4,m_controls_econ_health,m_cnts_econ_clarity)
+comparison
+
+```
+
+#### ICC невысокие, 0.13 - больше вариации объясняется на индив уровне. Смущает - что возвраст (центр перем) с коэф 0 но статист значим. Также смущает, что cent.response (ответ правительств на пандемию, введенные меры) измеренный на 2 уровне оказывается незначим и коэф близок к 0. Отчасти это наверное можно интерпретировать как rally effect (людям не так важно как среагировали правительства на пандемию, они объед вокруг лидеров).  объект comparison2 (далее внизу) - это сравнение random slope and interpcet моделей, где две модели без интеракции, и две из них с trust healthcare только в рандомной части. Смущает, можно ли моделировать trust healthcare только в рандомной части? Если переменная только в ранд части, то ICC растет до 0.39 (эта переменная вносит значимое объяснение). В целом возможная интерпретация моделей: увеличение среднего доверия к здравоохр ведет к увеличению доверия к правит на 0.6. Женщины доверяют больше, чем муж. увеличения доверия среди респондентов со средним ур образ на 1 ведет к увел доверия правительствам на 0.4. Респонденты проживающие в маленьких городах и селах (0) доверяют меньше. Люди, чувствующие неувер в работе (1) доверяют меньше как и люди, чье финан положение ухудшилось или возможно ухудшится в след 3 мес. Сама по себе увел среднего зн-ния перемен clarity ведет к увел доверия на 1.24. То есть, во время кризиса люди больше награждают в менее поляризованных контекстах (в теории, в норм время люди наоборот больше наказывают более сплоченные правительства тк им яснее кого наказывать). При этом эффект интеракции между средним clarity и потерей работы во время ковида ведет к значимому уменьш доверия.  
+
+```{r}
+##Adding random slope and intercept for healtcare since in theory HC differec across contries
+m_all_slope <- lmer(trust_govern ~ cent.healtcare + cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + finance_next3m + finance_last3m + cent.clarity+ cent.response +
+                            (1 + cent.healtcare|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+anova(m_all_slope, m_cnts_econ_clarity) #model with random slope and interpect better
+
+#?? if trust in healthcare only in random part?
+m_all_slope1 <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + finance_next3m + finance_last3m + cent.clarity+ cent.response +
+                            (1 + cent.healtcare|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+ #ICC increases = 0.39
+
+anova(m_all_slope,m_all_slope1) #m_all_slope better
+
+#Adding random slope and intercept for economy (none improves ICC)
+m_all_slope_econ <- lmer(trust_govern ~ cent.healtcare + cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid + finance_next3m + finance_last3m + cent.clarity + cent.response+
+                            (1 +  finance_last3m|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+tab_model(m_all_slope_econ)
+
+anova(m_all_slope_econ,m_cnts_econ_clarity) #model with random slope better
+
+##add interactions clarity * econ/healtcare evaluations (intr is sign with lostjob, jobinsec, hous_ends),only  govresponse_oxf*lostjob_covid is significant
+
+#inter with job_insec
+m_interact1 <- lmer(trust_govern ~ cent.healtcare + cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid +  finance_next3m + finance_last3m + cent.clarity + cent.response + cent.clarity*job_insec   + (1 +  cent.healtcare|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+anova(m_interact1, m_all_slope) #model with interaction is better
+
+#inter with lostjob_covid
+m_interact2 <- lmer(trust_govern ~ cent.healtcare + cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid +  finance_next3m + finance_last3m + cent.clarity + cent.response + cent.clarity*lostjob_covid   + (1 +  cent.healtcare|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+tab_model(m_interact2)
+#summary(m_interact2)
+
+anova(m_interact1,m_interact2) #m_interact2 better
+
+#govresponse_oxf is always insign - can be regarded as rally?
+#?? ?? if trust in healthcare only in random part2
+
+m_interact3 <- lmer(trust_govern ~ cent.age + gend + cent.educ + ind_health + urban + job_insec + lostjob_covid +  finance_next3m + finance_last3m + cent.clarity + cent.response + cent.clarity*lostjob_covid   + (1 +  cent.healtcare|name_country), data=round1_job_clean,  weights = w_gross_trim, na.action = na.omit, REML = F)
+
+anova(m_interact3,m_interact2) #2 better
+
+#comparison2
+comparison2 <- tab_model(m_all_slope, m_all_slope1, m_interact3,m_interact2)
+comparison2
+```
+
+## Assessing model
+
+#### Проверила только модель с интеракцией и доверием к здравоохр в рандом и фикс частях. Диагностика для других моделей из сравнения выглядила примерно также.Смущает очень график гомоскедостичности. 
+```{r}
+
+plot_model(m_interact2, type="diag")
+
+#test for multicolinearity
+vif.mer <- function (fit) {
+ 
+  v <- vcov(fit)
+  nam <- names(fixef(fit))
+  
+  ns <- sum(1 * (nam == "Intercept" | nam == "(Intercept)"))
+  if (ns > 0) {
+    v <- v[-(1:ns), -(1:ns), drop = FALSE]
+    nam <- nam[-(1:ns)]
+  }
+  
+  d <- diag(v)^0.5
+  v <- diag(solve(v/(d %o% d)))
+  names(v) <- nam
+  v
+}
+vif.mer(m_interact2) #all coef less than  3  - no problem
+
+#qq plot
+qqnorm(residuals(m_interact2), family="serif")
+qqline(residuals(m_interact2)) #normal one
+
+#coeff
+#for model with interaction and trust in HC in both random and fixed parts
+fixef(m_interact2)
+ranef(m_interact2)
+#for model with interaction and trust in HC in  random part
+fixef(m_interact3)
+ranef(m_interact3)
+
+#plot model
+plot_model(m_interact2)
+
+```
+
+## Marginal effects for mixed models
+```{r}
+pr1 <- ggpredict(m_interact2, c("finance_next3m", "job_insec"))
+plot(pr1) #people who feel insecure about job, expect their finance will worse and trust less. economy - trust connection
+
+
+
+#interaction. Possible interpretation: cent.clarity shows  + coeff meaning that increase in clarity in 1 leads to increase in trust in 1.24 (opposite to Hobolt et  all who show that in normal times increase in clarity leads to decrease in trust since people more understand whom to blame). While losing job*clarity leads to decrease in trust (- coeff). People who lost the job permanently [1] and in higher clarity environment tend to trust on the lowest level, while people who lost the job but clarity is blurred trust in govern as high as people who did not lose the job. For people who temporarily lost the job [2] trust in a bit higher where clarity is lower and less where clarity is higher. While people who didn't lose the job and are in high clarity contexts trust higher than people in lower clarity context.
+pr3 <- ggpredict(m_interact2, c("lostjob_covid ", "cent.clarity"))
+plot(pr3)  
+
+#by countries
+me2 <- ggpredict(m_interact2, terms = c("job_insec","name_country[DN, FI, SW, IT, SP, POL, ROM, GER]"), type = "random") #people who feel insecure about job[1] tend to trust less
+plot(me2)
+
+
+
+me3_random <- ggpredict(m_interact2, terms = c("cent.healtcare", "name_country[sample=9]"), type = "random")
+plot(me3_random)
+```
+
